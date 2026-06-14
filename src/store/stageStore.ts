@@ -11,6 +11,7 @@ import type {
   SyncThreshold,
   Template,
   ScriptVersion,
+  SafetyReport,
 } from '@/types';
 
 interface StageStore {
@@ -22,6 +23,7 @@ interface StageStore {
   syncErrors: SyncError[];
   syncEvents: SyncEvent[];
   scriptVersions: ScriptVersion[];
+  safetyReports: SafetyReport[];
   templates: Template[];
   activeAlertIds: string[];
 
@@ -58,11 +60,16 @@ interface StageStore {
 
   addSyncEvent: (event: SyncEvent) => void;
   acknowledgeSyncEvent: (eventId: string, operator: string) => void;
+  acknowledgeAllSyncEvents: (scriptId: string, operator: string) => string[];
   clearSyncEventsForScript: (scriptId: string) => void;
 
   addScriptVersion: (version: ScriptVersion) => void;
   removeScriptVersion: (id: string) => void;
   getScriptVersions: (scriptId: string) => ScriptVersion[];
+
+  saveSafetyReport: (report: SafetyReport) => void;
+  getSafetyReportsForScript: (scriptId: string) => SafetyReport[];
+  removeSafetyReport: (id: string) => void;
 
   addTemplate: (template: Template) => void;
   updateTemplate: (id: string, template: Partial<Template>) => void;
@@ -96,6 +103,7 @@ const storageKeys = {
   syncThreshold: 'stagerig_syncThreshold',
   syncEvents: 'stagerig_syncEvents',
   scriptVersions: 'stagerig_scriptVersions',
+  safetyReports: 'stagerig_safetyReports',
 };
 
 export const useStageStore = create<StageStore>((set, get) => ({
@@ -111,6 +119,7 @@ export const useStageStore = create<StageStore>((set, get) => ({
   syncErrors: [],
   syncEvents: loadFromStorage<SyncEvent[]>(storageKeys.syncEvents, []),
   scriptVersions: loadFromStorage<ScriptVersion[]>(storageKeys.scriptVersions, []),
+  safetyReports: loadFromStorage<SafetyReport[]>(storageKeys.safetyReports, []),
   templates: loadFromStorage<Template[]>(storageKeys.templates, []),
   activeAlertIds: [],
 
@@ -344,6 +353,20 @@ export const useStageStore = create<StageStore>((set, get) => ({
     set({ syncEvents });
     saveToStorage(storageKeys.syncEvents, syncEvents);
   },
+  acknowledgeAllSyncEvents: (scriptId, operator) => {
+    const now = Date.now();
+    const acknowledgedIds: string[] = [];
+    const syncEvents = get().syncEvents.map((e) => {
+      if (e.scriptId === scriptId && !e.acknowledged) {
+        acknowledgedIds.push(e.id);
+        return { ...e, acknowledged: true, acknowledgedBy: operator, acknowledgedAt: now };
+      }
+      return e;
+    });
+    set({ syncEvents });
+    saveToStorage(storageKeys.syncEvents, syncEvents);
+    return acknowledgedIds;
+  },
   clearSyncEventsForScript: (scriptId) => {
     const syncEvents = get().syncEvents.filter((e) => e.scriptId !== scriptId);
     set({ syncEvents });
@@ -361,7 +384,23 @@ export const useStageStore = create<StageStore>((set, get) => ({
     saveToStorage(storageKeys.scriptVersions, scriptVersions);
   },
   getScriptVersions: (scriptId) => {
-    return get().scriptVersions.filter((v) => v.scriptId === scriptId).sort((a, b) => b.createdAt - a.createdAt);
+    return get().scriptVersions.filter((v) => v.scriptId === scriptId);
+  },
+
+  saveSafetyReport: (report) => {
+    const safetyReports = [...get().safetyReports, report];
+    set({ safetyReports });
+    saveToStorage(storageKeys.safetyReports, safetyReports);
+  },
+  getSafetyReportsForScript: (scriptId) => {
+    return get().safetyReports
+      .filter((r) => r.scriptId === scriptId)
+      .sort((a, b) => b.generatedAt - a.generatedAt);
+  },
+  removeSafetyReport: (id) => {
+    const safetyReports = get().safetyReports.filter((r) => r.id !== id);
+    set({ safetyReports });
+    saveToStorage(storageKeys.safetyReports, safetyReports);
   },
 
   addTemplate: (template) => {

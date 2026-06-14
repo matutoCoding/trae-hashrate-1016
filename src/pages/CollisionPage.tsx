@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useStageStore } from '@/store/stageStore';
-import { RING_COLORS, type VerificationItem, type CollisionResult, type CollisionZone, type TurntableRing, type SafetyReport, type SafetyReportItem } from '@/types';
+import { RING_COLORS, type VerificationItem, type CollisionResult, type CollisionZone, type TurntableRing, type SafetyReport, type SafetyReportItem, type RiskItem, type MotionScript } from '@/types';
 import { linearVelocity, relativeLinearVelocity, detectCollisions, verifyTorque, verifySafety, computeCompositeTrajectory, angularPositionAt, rpmToRadPerSec, totalAngleAt, generateId } from '@/utils/physics';
 import { G_ACCEL, SAFETY_TANGENTIAL_ACCEL } from '@/types';
-import { ShieldAlert, AlertTriangle, CheckCircle2, Play, RotateCcw, Download, FileText, History } from 'lucide-react';
+import { ShieldAlert, AlertTriangle, CheckCircle2, Play, RotateCcw, Download, FileText, History, Save, AlertOctagon, Lightbulb, Gauge, Calendar } from 'lucide-react';
 
 const LINEAR_VELOCITY_LIMIT = 2.0;
 
@@ -453,19 +453,23 @@ function generateSafetyReport(
   sortedRings: TurntableRing[],
   segmentsMap: Record<string, import('@/types').MotionSegment[]>,
   collisionResults: CollisionResult[],
+  syncEvents: import('@/types').SyncEvent[] = [],
 ): SafetyReport | null {
   if (!script || script.scenes.length === 0) return null;
 
   const ringNameMap: Record<string, string> = {};
-  sortedRings.forEach(r => { ringNameMap[r.id] = r.name; });
+  const ringIdMap: Record<string, string> = {};
+  sortedRings.forEach(r => { ringNameMap[r.id] = r.name; ringIdMap[r.name] = r.id; });
 
   const sceneReports: SafetyReportItem[] = [];
+  const allRiskItems: RiskItem[] = [];
   let totalOverSpeed = 0;
   let totalTorqueWarnings = 0;
   let totalSafetyWarnings = 0;
   let totalCollisions = 0;
   let criticalCollisions = 0;
   let overallStatus: SafetyReport['overallStatus'] = 'ok';
+  let overallRiskScore = 0;
 
   for (const scene of script.scenes) {
     const sceneMotionSegs: Record<string, import('@/types').MotionSegment[]> = {};
@@ -478,12 +482,35 @@ function generateSafetyReport(
     for (const ring of sortedRings) {
       const segs = sceneMotionSegs[ring.id] || [];
       if (segs.length === 0) continue;
-      const maxRPM = Math.max(...segs.map(s => s.targetRPM));
+      let maxRPM = 0;
+      let peakSeg = segs[0];
+      for (const seg of segs) {
+        if (seg.targetRPM > maxRPM) { maxRPM = seg.targetRPM; peakSeg = seg; }
+      }
       const v = linearVelocity(maxRPM, ring.radius);
       if (v > LINEAR_VELOCITY_LIMIT) {
-        overSpeedItems.push({ ringName: ring.name, maxRPM, maxVelocity: v, limit: LINEAR_VELOCITY_LIMIT });
+        const peakTime = peakSeg.startTime + (peakSeg.endTime - peakSeg.startTime) / 2;
+        overSpeedItems.push({ ringName: ring.name, maxRPM, maxVelocity: v, limit: LINEAR_VELOCITY_LIMIT, peakTime });
         totalOverSpeed++;
         overallStatus = 'danger';
+
+        const riskId = `risk_${generateId()}`;
+        const overPct = ((v - LINEAR_VELOCITY_LIMIT) / LINEAR_VELOCITY_LIMIT) * 100;
+        const score = 20 + Math.min(overPct, 80);
+        allRiskItems.push({
+          id: riskId,
+          sceneId: scene.id,
+          sceneName: scene.name,
+          time: peakTime,
+          type: 'overspeed',
+          severity: overPct > 50 ? 'critical' : 'warning',
+          ringIds: [ring.id],
+          ringNames: [ring.name],
+          description: `${ring.name} 边缘线速度 ${v.toFixed(2)} m/s，超过安全限制 ${LINEAR_VELOCITY_LIMIT} m/s (${overPct.toFixed(0)}%)`,
+          score,
+          suggestion: `降低 ${ring.name} 转速至 ${Math.floor((LINEAR_VELOCITY_LIMIT / ring.radius) * 60 / (2 * Math.PI))} RPM 以下，或缩小环半径`,
+        });
+        overallRiskScore += score;
       }
     }
 
@@ -493,10 +520,28 @@ function generateSafetyReport(
       for (const seg of segs) {
         const v = verifyTorque(seg, ring);
         if (v.severity !== 'ok') {
-          torqueItems.push({ ringName: ring.name, value: v.value, limit: v.limit, severity: v.severity });
+          const peakTime = seg.startTime + (seg.endTime - seg.startTime) / 2;
+          torqueItems.push({ ringName: ring.name, value: v.value, limit: v.limit, severity: v.severity, peakTime });
           if (v.severity === 'danger') totalTorqueWarnings += 2; else totalTorqueWarnings++;
           if (v.severity === 'danger') overallStatus = 'danger';
           else if (overallStatus === 'ok') overallStatus = 'warning';
+
+          const riskId = `risk_${generateId()}`;
+          const score = v.severity === 'danger' ? 50 : 25;
+          allRiskItems.push({
+            id: riskId,
+            sceneId: scene.id,
+            sceneName: scene.name,
+            time: peakTime,
+            type: 'torque',
+            severity: v.severity as 'warning' | 'critical',
+            ringIds: [ring.id],
+            ringNames: [ring.name],
+            description: `${ring.name} 扭矩需求 ${v.value}，超过电机额定 ${v.limit}`,
+            score,
+            suggestion: `延长 ${ring.name} 的加减速时间（当前 ${seg.accelerationTime}s 加速，${seg.decelerationTime}s 减速），或降低目标转速`,
+          });
+          overallRiskScore += score;
         }
       }
     }
@@ -507,10 +552,28 @@ function generateSafetyReport(
       for (const seg of segs) {
         const v = verifySafety(seg, ring);
         if (v.severity !== 'ok') {
-          safetyItems.push({ ringName: ring.name, value: v.value, limit: v.limit, severity: v.severity });
+          const peakTime = seg.startTime + (seg.endTime - seg.startTime) / 2;
+          safetyItems.push({ ringName: ring.name, value: v.value, limit: v.limit, severity: v.severity, peakTime });
           if (v.severity === 'danger') totalSafetyWarnings += 2; else totalSafetyWarnings++;
           if (v.severity === 'danger') overallStatus = 'danger';
           else if (overallStatus === 'ok') overallStatus = 'warning';
+
+          const riskId = `risk_${generateId()}`;
+          const score = v.severity === 'danger' ? 60 : 30;
+          allRiskItems.push({
+            id: riskId,
+            sceneId: scene.id,
+            sceneName: scene.name,
+            time: peakTime,
+            type: 'safety',
+            severity: v.severity as 'warning' | 'critical',
+            ringIds: [ring.id],
+            ringNames: [ring.name],
+            description: `${ring.name} 切向加速度 ${v.value}，超过演员站立安全阈值 ${v.limit}`,
+            score,
+            suggestion: `降低 ${ring.name} 的加减速斜率，延长运动时间以减小加速度，确保演员不会因惯性摔倒`,
+          });
+          overallRiskScore += score;
         }
       }
     }
@@ -530,9 +593,41 @@ function generateSafetyReport(
           if (z.severity === 'critical') criticalCollisions++;
           if (z.severity === 'critical') overallStatus = 'danger';
           else if (overallStatus === 'ok') overallStatus = 'warning';
+
+          const riskId = `risk_${generateId()}`;
+          const duration = z.endTime - z.startTime;
+          const score = z.severity === 'critical' ? (40 + Math.min(duration * 10, 60)) : (20 + Math.min(duration * 5, 30));
+          allRiskItems.push({
+            id: riskId,
+            sceneId: scene.id,
+            sceneName: scene.name,
+            time: z.startTime,
+            type: 'collision',
+            severity: z.severity,
+            ringIds: [cr.ringIdA, cr.ringIdB],
+            ringNames: [ringNameMap[cr.ringIdA] ?? cr.ringIdA, ringNameMap[cr.ringIdB] ?? cr.ringIdB],
+            description: `${ringNameMap[cr.ringIdA] ?? cr.ringIdA} 与 ${ringNameMap[cr.ringIdB] ?? cr.ringIdB} 在 ${z.startTime.toFixed(1)}s - ${z.endTime.toFixed(1)}s 发生${z.severity === 'critical' ? '严重' : ''}碰撞，持续 ${duration.toFixed(1)}s`,
+            score,
+            suggestion: `调整 ${ringNameMap[cr.ringIdA] ?? cr.ringIdA} 和 ${ringNameMap[cr.ringIdB] ?? cr.ringIdB} 的转速方向或启停时序，避免反向旋转重叠；或错开碰撞时间段，将其中一环的运动延后 ${(duration + 0.5).toFixed(1)}s`,
+          });
+          overallRiskScore += score;
         }
       }
     }
+
+    let sceneRiskScore = 0;
+    sceneRiskScore += overSpeedItems.length * 25;
+    sceneRiskScore += torqueItems.filter(t => t.severity === 'danger').length * 50;
+    sceneRiskScore += torqueItems.filter(t => t.severity === 'warning').length * 25;
+    sceneRiskScore += safetyItems.filter(s => s.severity === 'danger').length * 60;
+    sceneRiskScore += safetyItems.filter(s => s.severity === 'warning').length * 30;
+    sceneRiskScore += collisionItems.filter(c => c.severity === 'critical').length * 80;
+    sceneRiskScore += collisionItems.filter(c => c.severity === 'warning').length * 40;
+
+    let riskLevel: SafetyReportItem['riskLevel'] = 'low';
+    if (sceneRiskScore >= 150) riskLevel = 'critical';
+    else if (sceneRiskScore >= 80) riskLevel = 'high';
+    else if (sceneRiskScore >= 30) riskLevel = 'medium';
 
     sceneReports.push({
       sceneId: scene.id,
@@ -543,18 +638,49 @@ function generateSafetyReport(
       torqueItems,
       safetyItems,
       collisionItems,
+      riskScore: sceneRiskScore,
+      riskLevel,
     });
   }
 
+  allRiskItems.sort((a, b) => b.score - a.score);
+
+  const recommendations: string[] = [];
+  if (criticalCollisions > 0) {
+    recommendations.push(`【最高优先级】存在 ${criticalCollisions} 处严重碰撞，必须立即调整相关环的运动方向或时序，避免演出事故`);
+  }
+  if (totalOverSpeed > 0) {
+    recommendations.push(`存在 ${totalOverSpeed} 处边缘线速度超速，建议降低高速环的转速，防止道具被甩出`);
+  }
+  const torqueDanger = sceneReports.reduce((sum, s) => sum + s.torqueItems.filter(t => t.severity === 'danger').length, 0);
+  if (torqueDanger > 0) {
+    recommendations.push(`存在 ${torqueDanger} 处扭矩严重告警，可能导致电机过载跳闸，需延长加减速时间`);
+  }
+  const safetyDanger = sceneReports.reduce((sum, s) => sum + s.safetyItems.filter(si => si.severity === 'danger').length, 0);
+  if (safetyDanger > 0) {
+    recommendations.push(`存在 ${safetyDanger} 处演员安全加速度告警，过大的加速度可能导致演员摔倒，需放缓运动节奏`);
+  }
+  if (allRiskItems.length > 0) {
+    const topRisk = allRiskItems[0];
+    recommendations.push(`最高风险点：${topRisk.sceneName} ${topRisk.time.toFixed(1)}s - ${topRisk.description}`);
+  }
+  if (recommendations.length === 0) {
+    recommendations.push('✓ 脚本安全检查通过，所有参数均在安全范围内，可以放心演出');
+  }
+
   const scriptDuration = Math.max(...script.scenes.map(s => s.endTime), 0);
+  const acknowledgedEventIds = syncEvents.filter(e => e.scriptId === script.id && e.acknowledged).map(e => e.id);
 
   return {
+    id: `report_${generateId()}`,
     scriptId: script.id,
     scriptName: script.name,
     operator: script.operator,
     generatedAt: Date.now(),
+    performanceDate: new Date().toISOString().split('T')[0],
     totalDuration: scriptDuration,
     overallStatus,
+    overallRiskScore,
     scenes: sceneReports,
     summary: {
       totalOverSpeed,
@@ -563,6 +689,10 @@ function generateSafetyReport(
       totalCollisions,
       criticalCollisions,
     },
+    riskRanking: allRiskItems,
+    recommendations,
+    scriptSnapshot: JSON.parse(JSON.stringify(script)),
+    acknowledgedEvents: acknowledgedEventIds,
   };
 }
 
@@ -572,11 +702,15 @@ function reportToText(report: SafetyReport): string {
   lines.push('║            舞台转台演出安全报告                              ║');
   lines.push('╚══════════════════════════════════════════════════════════════╝');
   lines.push('');
+  lines.push(`报告编号: ${report.id}`);
   lines.push(`生成时间: ${new Date(report.generatedAt).toLocaleString('zh-CN')}`);
+  lines.push(`演出日期: ${report.performanceDate || new Date().toISOString().split('T')[0]}`);
   lines.push(`脚本名称: ${report.scriptName}`);
   lines.push(`操作员: ${report.operator || '(未填写)'}`);
   lines.push(`总时长: ${formatNum(report.totalDuration, 1)}s`);
   lines.push(`整体状态: ${report.overallStatus === 'ok' ? '✓ 安全' : report.overallStatus === 'warning' ? '⚠ 警告' : '✗ 危险'}`);
+  lines.push(`综合风险评分: ${report.overallRiskScore.toFixed(0)} 分`);
+  lines.push(`已确认告警: ${(report.acknowledgedEvents?.length || 0)} 条`);
   lines.push('');
   lines.push('═══════════════════════════════════════════════════════════════');
   lines.push('【汇总统计】');
@@ -584,6 +718,27 @@ function reportToText(report: SafetyReport): string {
   lines.push(`  • 扭矩告警: ${report.summary.totalTorqueWarnings} 项`);
   lines.push(`  • 安全加速度告警: ${report.summary.totalSafetyWarnings} 项`);
   lines.push(`  • 碰撞片段: ${report.summary.totalCollisions} 段 (严重: ${report.summary.criticalCollisions} 段)`);
+  lines.push('');
+  lines.push('═══════════════════════════════════════════════════════════════');
+  lines.push('【风险排序 TOP 10】（按危险程度从高到低）');
+  const topRisks = report.riskRanking.slice(0, 10);
+  topRisks.forEach((r, i) => {
+    const sev = r.severity === 'critical' ? '严重' : '警告';
+    const typeName = { collision: '碰撞', overspeed: '超速', torque: '扭矩', safety: '安全' }[r.type];
+    lines.push(`  ${i + 1}. [${sev}] ${r.sceneName} t=${r.time.toFixed(1)}s (${r.score.toFixed(0)}分)`);
+    lines.push(`     ${typeName}: ${r.description}`);
+    lines.push(`     建议: ${r.suggestion}`);
+    lines.push('');
+  });
+  if (report.riskRanking.length === 0) {
+    lines.push('  ✓ 无风险项');
+    lines.push('');
+  }
+  lines.push('═══════════════════════════════════════════════════════════════');
+  lines.push('【整改建议】');
+  report.recommendations.forEach((rec, i) => {
+    lines.push(`  ${i + 1}. ${rec}`);
+  });
   lines.push('');
   lines.push('═══════════════════════════════════════════════════════════════');
 

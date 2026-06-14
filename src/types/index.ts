@@ -110,19 +110,38 @@ export interface SafetyReportItem {
   sceneName: string;
   startTime: number;
   endTime: number;
-  overSpeedItems: { ringName: string; maxRPM: number; maxVelocity: number; limit: number }[];
-  torqueItems: { ringName: string; value: string; limit: string; severity: 'ok' | 'warning' | 'danger' }[];
-  safetyItems: { ringName: string; value: string; limit: string; severity: 'ok' | 'warning' | 'danger' }[];
+  overSpeedItems: { ringName: string; maxRPM: number; maxVelocity: number; limit: number; peakTime: number }[];
+  torqueItems: { ringName: string; value: string; limit: string; severity: 'ok' | 'warning' | 'danger'; peakTime: number }[];
+  safetyItems: { ringName: string; value: string; limit: string; severity: 'ok' | 'warning' | 'danger'; peakTime: number }[];
   collisionItems: { ringA: string; ringB: string; startTime: number; endTime: number; severity: 'warning' | 'critical' }[];
+  riskScore: number;
+  riskLevel: 'low' | 'medium' | 'high' | 'critical';
+}
+
+export interface RiskItem {
+  id: string;
+  sceneId: string;
+  sceneName: string;
+  time: number;
+  type: 'collision' | 'overspeed' | 'torque' | 'safety';
+  severity: 'warning' | 'critical';
+  ringIds: string[];
+  ringNames: string[];
+  description: string;
+  score: number;
+  suggestion: string;
 }
 
 export interface SafetyReport {
+  id: string;
   scriptId: string;
   scriptName: string;
   operator: string;
   generatedAt: number;
+  performanceDate?: string;
   totalDuration: number;
   overallStatus: 'ok' | 'warning' | 'danger';
+  overallRiskScore: number;
   scenes: SafetyReportItem[];
   summary: {
     totalOverSpeed: number;
@@ -131,6 +150,10 @@ export interface SafetyReport {
     totalCollisions: number;
     criticalCollisions: number;
   };
+  riskRanking: RiskItem[];
+  recommendations: string[];
+  scriptSnapshot?: MotionScript;
+  acknowledgedEvents?: string[];
 }
 
 export interface SyncThreshold {
