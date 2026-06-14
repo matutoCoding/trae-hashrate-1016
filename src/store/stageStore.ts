@@ -53,6 +53,7 @@ interface StageStore {
 
   addActiveAlert: (id: string) => void;
   removeActiveAlert: (id: string) => void;
+  clearActiveAlerts: () => void;
 }
 
 function loadFromStorage<T>(key: string, fallback: T): T {
@@ -266,6 +267,7 @@ export const useStageStore = create<StageStore>((set, get) => ({
     saveToStorage(storageKeys.templates, templates);
   },
 
-  addActiveAlert: (id) => set((s) => ({ activeAlertIds: [...s.activeAlertIds, id] })),
+  addActiveAlert: (id) => set((s) => ({ activeAlertIds: s.activeAlertIds.includes(id) ? s.activeAlertIds : [...s.activeAlertIds, id] })),
   removeActiveAlert: (id) => set((s) => ({ activeAlertIds: s.activeAlertIds.filter((a) => a !== id) })),
+  clearActiveAlerts: () => set({ activeAlertIds: [] }),
 }));

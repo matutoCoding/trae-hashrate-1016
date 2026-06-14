@@ -12,7 +12,7 @@
     "check": "tsc -b --noEmit",
     "electron:dev": "vite --port 5173 & wait-on http://localhost:5173 && electron .",
     "electron:build": "npm run build && electron-builder",
-    "electron:start": "electron ."
+    "electron:start": "node -e \"require('fs').existsSync('dist/index.html')||process.exit(1)\" || npm run build && electron ."
   },
   "dependencies": {
     "clsx": "^2.1.1",

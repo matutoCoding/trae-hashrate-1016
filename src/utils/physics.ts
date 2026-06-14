@@ -100,6 +100,24 @@ export function angularVelocityAt(
   return targetRad * (1 - 3 * pd * pd + 2 * pd * pd * pd);
 }
 
+export function totalAngleAt(
+  globalTime: number,
+  segments: MotionSegment[],
+  initialAngle: number
+): number {
+  let angle = initialAngle;
+  const sorted = [...segments].sort((a, b) => a.startTime - b.startTime);
+  for (const seg of sorted) {
+    if (globalTime >= seg.endTime) {
+      angle = angularPositionAt(seg.endTime, seg, angle);
+    } else if (globalTime >= seg.startTime && globalTime <= seg.endTime) {
+      angle = angularPositionAt(globalTime, seg, angle);
+      break;
+    }
+  }
+  return angle;
+}
+
 export function angularPositionAt(
   t: number,
   segment: MotionSegment,
@@ -184,39 +202,28 @@ export function detectCollisions(
   let zoneStartAngle = 0;
 
   for (let t = 0; t <= duration; t += timeStep) {
-    let posA = ringA.initialAngle;
-    let posB = ringB.initialAngle;
+    const posA = totalAngleAt(t, segmentsA, ringA.initialAngle);
+    const posB = totalAngleAt(t, segmentsB, ringB.initialAngle);
 
-    for (const seg of segmentsA) {
-      if (t >= seg.startTime && t <= seg.endTime) {
-        posA = angularPositionAt(t, seg, ringA.initialAngle);
-        break;
-      }
-    }
-    for (const seg of segmentsB) {
-      if (t >= seg.startTime && t <= seg.endTime) {
-        posB = angularPositionAt(t, seg, ringB.initialAngle);
-        break;
-      }
-    }
-
-    const angleDiff = Math.abs(((posA - posB) % 360 + 360) % 360);
-    const normalizedDiff = Math.min(angleDiff, 360 - angleDiff);
+    const posANorm = ((posA % 360) + 360) % 360;
+    const posBNorm = ((posB % 360) + 360) % 360;
+    const diff = Math.abs(posANorm - posBNorm);
+    const normalizedDiff = Math.min(diff, 360 - diff);
 
     if (normalizedDiff < propWidthDeg) {
       if (!inZone) {
         inZone = true;
         zoneStart = t;
-        zoneStartAngle = normalizedDiff;
+        zoneStartAngle = Math.min(posANorm, posBNorm) - propWidthDeg / 2;
       }
     } else {
       if (inZone) {
         zones.push({
-          startAngle: zoneStartAngle,
-          endAngle: propWidthDeg,
+          startAngle: ((zoneStartAngle % 360) + 360) % 360,
+          endAngle: ((((zoneStartAngle + propWidthDeg) % 360) + 360) % 360),
           startTime: zoneStart,
           endTime: t - timeStep,
-          severity: zoneStartAngle < propWidthDeg * 0.5 ? 'critical' : 'warning',
+          severity: normalizedDiff < propWidthDeg * 0.5 ? 'critical' : 'warning',
         });
         hasCollision = true;
         inZone = false;
@@ -226,11 +233,11 @@ export function detectCollisions(
 
   if (inZone) {
     zones.push({
-      startAngle: zoneStartAngle,
-      endAngle: propWidthDeg,
+      startAngle: ((zoneStartAngle % 360) + 360) % 360,
+      endAngle: ((((zoneStartAngle + propWidthDeg) % 360) + 360) % 360),
       startTime: zoneStart,
       endTime: duration,
-      severity: zoneStartAngle < propWidthDeg * 0.5 ? 'critical' : 'warning',
+      severity: 'warning',
     });
     hasCollision = true;
   }
@@ -300,18 +307,19 @@ export function verifySafety(
 }
 
 export function computeCompositeTrajectory(
-  segment: MotionSegment,
+  segments: MotionSegment[],
   ring: TurntableRing,
   liftStartTime: number,
   liftEndTime: number,
   liftSpeed: number,
   liftStartHeight: number,
-  duration: number,
+  globalStartTime: number,
+  globalEndTime: number,
   timeStep: number = 0.1
 ): { x: number; y: number; z: number; t: number }[] {
   const points: { x: number; y: number; z: number; t: number }[] = [];
-  for (let t = 0; t <= duration; t += timeStep) {
-    const angle = angularPositionAt(t, segment, ring.initialAngle);
+  for (let t = globalStartTime; t <= globalEndTime; t += timeStep) {
+    const angle = totalAngleAt(t, segments, ring.initialAngle);
     const rad = (angle * Math.PI) / 180;
     let h = liftStartHeight;
     if (t >= liftStartTime && t <= liftEndTime) {

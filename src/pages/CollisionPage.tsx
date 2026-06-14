@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useStageStore } from '@/store/stageStore';
 import { RING_COLORS, type VerificationItem, type CollisionResult, type CollisionZone, type TurntableRing } from '@/types';
-import { linearVelocity, relativeLinearVelocity, detectCollisions, verifyTorque, verifySafety, computeCompositeTrajectory, angularPositionAt, rpmToRadPerSec } from '@/utils/physics';
+import { linearVelocity, relativeLinearVelocity, detectCollisions, verifyTorque, verifySafety, computeCompositeTrajectory, angularPositionAt, rpmToRadPerSec, totalAngleAt } from '@/utils/physics';
 import { G_ACCEL, SAFETY_TANGENTIAL_ACCEL } from '@/types';
 import { ShieldAlert, AlertTriangle, CheckCircle2, Play, RotateCcw } from 'lucide-react';
 
@@ -193,13 +193,7 @@ function TurntableCanvas({
       const innerR = i > 0 ? rings[i - 1].radius * scale : 0;
 
       const segs = segmentsMap[ring.id] || [];
-      let angleOffset = ring.initialAngle;
-      for (const seg of segs) {
-        if (animTime >= seg.startTime && animTime <= seg.endTime) {
-          angleOffset = angularPositionAt(animTime, seg, ring.initialAngle);
-          break;
-        }
-      }
+      const angleOffset = totalAngleAt(animTime, segs, ring.initialAngle);
       const angleRad = (angleOffset * Math.PI) / 180;
 
       const ringColor = RING_COLORS[i % RING_COLORS.length];
@@ -566,18 +560,15 @@ export default function CollisionPage() {
         if (!hasOverlap) continue;
 
         const liftSeg = scene.liftSegments[0];
-        const motionSeg = scene.motionSegments.find(s => s.ringId === ring.id);
-        if (!motionSeg) continue;
-
-        const duration = scene.endTime - scene.startTime;
         const points = computeCompositeTrajectory(
-          motionSeg,
+          segs,
           ring,
           liftSeg.startTime,
           liftSeg.endTime,
           liftSeg.speed,
           0,
-          duration,
+          0,
+          scriptDuration,
           0.2,
         );
         compositeTrajectoryData.push({ ringName: ring.name, points });
@@ -771,6 +762,21 @@ export default function CollisionPage() {
           >
             t = {formatNum(animTime, 1)}s
           </span>
+          <input
+            type="range"
+            min={0}
+            max={scriptDuration}
+            step={0.1}
+            value={animTime}
+            onChange={(e) => {
+              setAnimPlaying(false);
+              setAnimTime(parseFloat(e.target.value));
+            }}
+            style={{
+              width: 180,
+              accentColor: 'var(--accent)',
+            }}
+          />
         </div>
       </div>
 

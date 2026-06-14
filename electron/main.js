@@ -1,5 +1,6 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
+const fs = require('fs');
 
 let mainWindow;
 
@@ -20,13 +21,16 @@ function createWindow() {
     show: false,
   });
 
-  const isDev = !app.isPackaged;
+  const distIndex = path.join(__dirname, '..', 'dist', 'index.html');
+  const hasDist = fs.existsSync(distIndex);
+  const forceDev = process.env.STAGERIG_DEV === '1';
 
-  if (isDev) {
-    mainWindow.loadURL('http://localhost:5173');
-    mainWindow.webContents.openDevTools();
+  if (forceDev || !hasDist) {
+    const devUrl = process.env.STAGERIG_DEV_URL || 'http://localhost:5173';
+    mainWindow.loadURL(devUrl);
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
-    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    mainWindow.loadFile(distIndex);
   }
 
   mainWindow.once('ready-to-show', () => {

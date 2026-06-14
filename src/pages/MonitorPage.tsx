@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useStageStore } from '@/store/stageStore';
 import { RING_COLORS, type SyncError, type SyncThreshold } from '@/types';
-import { angularPositionAt, rpmToRadPerSec } from '@/utils/physics';
+import { angularPositionAt, rpmToRadPerSec, totalAngleAt } from '@/utils/physics';
 import {
   Activity,
   Play,
@@ -226,6 +226,7 @@ export default function MonitorPage() {
     activeAlertIds,
     addActiveAlert,
     removeActiveAlert,
+    clearActiveAlerts,
   } = useStageStore();
 
   const [playing, setPlaying] = useState(false);
@@ -281,13 +282,7 @@ export default function MonitorPage() {
         }
       }
 
-      let idealAngle = ring.initialAngle;
-      for (const seg of segs) {
-        if (currentTime >= seg.startTime && currentTime <= seg.endTime) {
-          idealAngle = angularPositionAt(currentTime, seg, ring.initialAngle);
-          break;
-        }
-      }
+      let idealAngle = totalAngleAt(currentTime, segs, ring.initialAngle);
 
       const noiseScale = 0.02 + Math.random() * 0.03;
       const angleError = (Math.random() - 0.5) * 2 * syncThreshold.angleError * noiseScale * 10;
@@ -352,6 +347,7 @@ export default function MonitorPage() {
     setPlaying(false);
     setCurrentTime(0);
     clearSyncErrors();
+    clearActiveAlerts();
     setLocalAlerts([]);
     setAngleTrend({});
     setTimeTrend({});
@@ -361,6 +357,7 @@ export default function MonitorPage() {
   const handleReplay = () => {
     setCurrentTime(0);
     clearSyncErrors();
+    clearActiveAlerts();
     setLocalAlerts([]);
     setAngleTrend({});
     setTimeTrend({});
@@ -369,6 +366,10 @@ export default function MonitorPage() {
   };
 
   const acknowledgeAlert = (idx: number) => {
+    const alert = localAlerts[idx];
+    if (alert && (alert as SyncError & { id?: string }).id) {
+      removeActiveAlert((alert as SyncError & { id: string }).id);
+    }
     setLocalAlerts((prev) => prev.filter((_, i) => i !== idx));
   };
 
@@ -540,7 +541,7 @@ export default function MonitorPage() {
             {localAlerts.length} 条活跃告警
           </span>
           <button
-            onClick={() => { setLocalAlerts([]); clearSyncErrors(); }}
+            onClick={() => { setLocalAlerts([]); clearSyncErrors(); clearActiveAlerts(); }}
             style={{
               marginLeft: 'auto',
               padding: '4px 10px',
