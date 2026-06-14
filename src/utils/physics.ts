@@ -106,7 +106,7 @@ export function angularPositionAt(
   initialAngle: number
 ): number {
   const direction = segment.direction;
-  const targetRad = rpmToRadPerSec(segment.targetRPM) * direction;
+  const targetOmega = rpmToRadPerSec(segment.targetRPM) * direction;
   const accelDur = segment.accelerationTime;
   const totalDur = segment.endTime - segment.startTime;
   const decelDur = segment.decelerationTime;
@@ -114,21 +114,50 @@ export function angularPositionAt(
   const elapsed = t - segment.startTime;
 
   if (elapsed <= 0) return initialAngle;
-  if (elapsed >= totalDur) {
-    const totalAngle = targetRad * totalDur * 0.5 * (totalDur / (accelDur + steadyDur + decelDur || 1));
-    return initialAngle + targetRad * (totalDur - 0.5 * accelDur - 0.5 * decelDur);
+
+  let dispRad = 0;
+
+  if (segment.curveType === 'trapezoidal') {
+    if (elapsed >= totalDur) {
+      dispRad = 0.5 * targetOmega * accelDur + targetOmega * steadyDur + 0.5 * targetOmega * decelDur;
+    } else if (elapsed < accelDur) {
+      dispRad = 0.5 * targetOmega * elapsed * elapsed / accelDur;
+    } else if (elapsed < accelDur + steadyDur) {
+      const accelDisp = 0.5 * targetOmega * accelDur;
+      dispRad = accelDisp + targetOmega * (elapsed - accelDur);
+    } else {
+      const accelDisp = 0.5 * targetOmega * accelDur;
+      const steadyDisp = targetOmega * steadyDur;
+      const decelElapsed = elapsed - accelDur - steadyDur;
+      dispRad = accelDisp + steadyDisp + targetOmega * decelElapsed * (1 - 0.5 * decelElapsed / decelDur);
+    }
+  } else {
+    if (elapsed >= totalDur) {
+      const accelDisp = targetOmega * accelDur * (1 - 1 / (accelDur > 0 ? 2 : 1));
+      dispRad = 0;
+      const pp = 1;
+      dispRad += targetOmega * accelDur * (pp * pp * pp - 0.5 * pp * pp * pp * pp);
+      dispRad += targetOmega * steadyDur;
+      const pd = 1;
+      dispRad += targetOmega * decelDur * (pd - 1.5 * pd * pd + 0.5 * pd * pd * pd);
+    } else if (elapsed < accelDur) {
+      const p = elapsed / (accelDur || 1);
+      dispRad = targetOmega * accelDur * (p * p * p - 0.5 * p * p * p * p);
+    } else if (elapsed < accelDur + steadyDur) {
+      const p = 1;
+      const accelDisp = targetOmega * accelDur * (p * p * p - 0.5 * p * p * p * p);
+      dispRad = accelDisp + targetOmega * (elapsed - accelDur);
+    } else {
+      const p = 1;
+      const accelDisp = targetOmega * accelDur * (p * p * p - 0.5 * p * p * p * p);
+      const steadyDisp = targetOmega * steadyDur;
+      const pd = (elapsed - accelDur - steadyDur) / (decelDur || 1);
+      const decelDisp = targetOmega * decelDur * (pd - 1.5 * pd * pd + 0.5 * pd * pd * pd);
+      dispRad = accelDisp + steadyDisp + decelDisp;
+    }
   }
 
-  let angle = initialAngle;
-  if (elapsed < accelDur) {
-    angle += 0.5 * targetRad * (elapsed / accelDur) * elapsed;
-  } else if (elapsed < accelDur + steadyDur) {
-    angle += 0.5 * targetRad * accelDur + targetRad * (elapsed - accelDur);
-  } else {
-    const decelElapsed = elapsed - accelDur - steadyDur;
-    angle += 0.5 * targetRad * accelDur + targetRad * steadyDur + targetRad * decelElapsed - 0.5 * targetRad * (decelElapsed / decelDur) * decelElapsed;
-  }
-  return angle;
+  return initialAngle + (dispRad * 180) / Math.PI;
 }
 
 export function detectCollisions(

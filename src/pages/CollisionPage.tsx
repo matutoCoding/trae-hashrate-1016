@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useStageStore } from '@/store/stageStore';
-import { RING_COLORS, type VerificationItem, type CollisionResult, type CollisionZone } from '@/types';
+import { RING_COLORS, type VerificationItem, type CollisionResult, type CollisionZone, type TurntableRing } from '@/types';
 import { linearVelocity, relativeLinearVelocity, detectCollisions, verifyTorque, verifySafety, computeCompositeTrajectory, angularPositionAt, rpmToRadPerSec } from '@/utils/physics';
 import { G_ACCEL, SAFETY_TANGENTIAL_ACCEL } from '@/types';
 import { ShieldAlert, AlertTriangle, CheckCircle2, Play, RotateCcw } from 'lucide-react';
@@ -129,22 +129,15 @@ function TurntableCanvas({
   rings,
   collisionResults,
   animTime,
-  animPlaying,
   segmentsMap,
 }: {
-  rings: ReturnType<typeof useStageStore>['rings'];
-  collisionResults: CollisionResult[];
-  animTime: number;
-  animPlaying: boolean;
-  segmentsMap: Record<string, import('@/types').MotionSegment[]>;
+  rings: TurntableRing[],
+  collisionResults: CollisionResult[],
+  animTime: number,
+  segmentsMap: Record<string, import('@/types').MotionSegment[]>,
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef<number>(0);
-  const timeRef = useRef<number>(animTime);
-
-  useEffect(() => {
-    timeRef.current = animTime;
-  }, [animTime]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -167,7 +160,7 @@ function TurntableCanvas({
 
     ctx.clearRect(0, 0, size, size);
 
-    ctx.fillStyle = 'var(--bg-primary)';
+    ctx.fillStyle = '#0D1117';
     ctx.fillRect(0, 0, size, size);
 
     const gridColor = 'rgba(45, 53, 72, 0.5)';
@@ -202,8 +195,8 @@ function TurntableCanvas({
       const segs = segmentsMap[ring.id] || [];
       let angleOffset = ring.initialAngle;
       for (const seg of segs) {
-        if (timeRef.current >= seg.startTime && timeRef.current <= seg.endTime) {
-          angleOffset = angularPositionAt(timeRef.current, seg, ring.initialAngle);
+        if (animTime >= seg.startTime && animTime <= seg.endTime) {
+          angleOffset = angularPositionAt(animTime, seg, ring.initialAngle);
           break;
         }
       }
@@ -246,9 +239,6 @@ function TurntableCanvas({
     }
 
     for (const zone of allZones) {
-      const startRad = (zone.startAngle * Math.PI) / 180;
-      const endRad = (zone.endAngle * Math.PI) / 180;
-
       const isCritical = zone.severity === 'critical';
       const flashVisible = flashOn || !isCritical;
 
@@ -256,6 +246,9 @@ function TurntableCanvas({
         for (let ri = 0; ri < rings.length - 1; ri++) {
           const boundaryR = rings[ri].radius * scale;
           const bandWidth = 12;
+
+          const startRad = (zone.startAngle * Math.PI) / 180;
+          const endRad = (zone.endAngle * Math.PI) / 180;
 
           ctx.save();
           ctx.translate(cx, cy);
@@ -291,36 +284,27 @@ function TurntableCanvas({
     ctx.font = '12px "Source Sans 3", sans-serif';
     ctx.fillStyle = 'rgba(255, 59, 59, 0.8)';
     ctx.fillRect(16, legendY, 12, 12);
-    ctx.fillStyle = 'var(--text-secondary)';
+    ctx.fillStyle = '#8B949E';
     ctx.fillText('碰撞区域', 34, legendY + 11);
 
     ctx.fillStyle = 'rgba(0, 212, 170, 0.6)';
     ctx.fillRect(110, legendY, 12, 12);
-    ctx.fillStyle = 'var(--text-secondary)';
+    ctx.fillStyle = '#8B949E';
     ctx.fillText('安全区域', 128, legendY + 11);
 
     ctx.fillStyle = 'rgba(255, 140, 0, 0.6)';
     ctx.fillRect(204, legendY, 12, 12);
-    ctx.fillStyle = 'var(--text-secondary)';
+    ctx.fillStyle = '#8B949E';
     ctx.fillText('警告区域', 222, legendY + 11);
-  }, [rings, collisionResults, segmentsMap]);
+  }, [rings, collisionResults, segmentsMap, animTime]);
 
   useEffect(() => {
-    let running = true;
-    const loop = () => {
-      if (!running) return;
-      if (animPlaying) {
-        timeRef.current += 0.016;
-      }
-      draw();
-      frameRef.current = requestAnimationFrame(loop);
-    };
-    loop();
+    draw();
+    frameRef.current = requestAnimationFrame(draw);
     return () => {
-      running = false;
       cancelAnimationFrame(frameRef.current);
     };
-  }, [draw, animPlaying]);
+  }, [draw]);
 
   return (
     <div style={{ display: 'flex', justifyContent: 'center' }}>
@@ -527,6 +511,10 @@ export default function CollisionPage() {
     });
   }
 
+  const scriptDuration = currentScript
+    ? Math.max(...currentScript.scenes.map((s) => s.endTime), 10)
+    : 60;
+
   const collisionResults: CollisionResult[] = [];
   for (let i = 0; i < sortedRings.length - 1; i++) {
     for (let j = i + 1; j < sortedRings.length; j++) {
@@ -535,6 +523,9 @@ export default function CollisionPage() {
         sortedRings[j],
         segmentsMap[sortedRings[i].id] || [],
         segmentsMap[sortedRings[j].id] || [],
+        30,
+        0.1,
+        scriptDuration,
       );
       if (result.hasCollision) {
         collisionResults.push(result);
@@ -607,7 +598,7 @@ export default function CollisionPage() {
       lastTs = ts;
       setAnimTime(prev => {
         const next = prev + dt * animSpeed;
-        return next > 120 ? 0 : next;
+        return next > scriptDuration ? 0 : next;
       });
       raf = requestAnimationFrame(step);
     };
@@ -987,7 +978,6 @@ export default function CollisionPage() {
               rings={sortedRings}
               collisionResults={collisionResults}
               animTime={animTime}
-              animPlaying={animPlaying}
               segmentsMap={segmentsMap}
             />
             {hasAnyCollision && (
