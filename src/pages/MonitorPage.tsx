@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useStageStore } from '@/store/stageStore';
-import { RING_COLORS, type SyncError, type SyncThreshold } from '@/types';
-import { angularPositionAt, rpmToRadPerSec, totalAngleAt } from '@/utils/physics';
+import { RING_COLORS, type SyncError, type SyncThreshold, type SyncEvent } from '@/types';
+import { angularPositionAt, rpmToRadPerSec, totalAngleAt, generateId } from '@/utils/physics';
 import {
   Activity,
   Play,
@@ -15,6 +15,9 @@ import {
   RotateCcw,
   AlertTriangle,
   CheckCircle2,
+  History,
+  User,
+  Clock,
 } from 'lucide-react';
 
 function GaugeCanvas({
@@ -227,15 +230,24 @@ export default function MonitorPage() {
     addActiveAlert,
     removeActiveAlert,
     clearActiveAlerts,
+    syncEvents,
+    addSyncEvent,
+    acknowledgeSyncEvent,
   } = useStageStore();
 
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [muted, setMuted] = useState(false);
+  const [operator, setOperator] = useState(localStorage.getItem('stagerig_operator') || '');
   const [localAlerts, setLocalAlerts] = useState<SyncError[]>([]);
   const [angleTrend, setAngleTrend] = useState<Record<string, { t: number; v: number }[]>>({});
   const [timeTrend, setTimeTrend] = useState<Record<string, { t: number; v: number }[]>>({});
   const [ringErrors, setRingErrors] = useState<Record<string, { angleError: number; timeError: number; status: 'ok' | 'warn' | 'danger'; isStutter: boolean; isJitter: boolean }>>({});
+  const [activeTab, setActiveTab] = useState<'monitor' | 'events'>('monitor');
+
+  useEffect(() => {
+    localStorage.setItem('stagerig_operator', operator);
+  }, [operator]);
 
   const currentScript = scripts.find((s) => s.id === currentScriptId) ?? null;
   const playDuration = currentScript
@@ -319,7 +331,8 @@ export default function MonitorPage() {
       ];
 
       if (status === 'danger' || isStutter || isJitter) {
-        const alertId = `${ring.id}-${Date.now()}`;
+        const eventId = generateId();
+        const alertId = eventId;
         const err: SyncError = {
           ringId: ring.id,
           timestamp: Date.now(),
@@ -330,6 +343,15 @@ export default function MonitorPage() {
         };
         addSyncError(err);
         addActiveAlert(alertId);
+
+        const event: SyncEvent = {
+          ...err,
+          id: eventId,
+          scriptId: currentScript!.id,
+          timeInScript: currentTime,
+          acknowledged: false,
+        };
+        addSyncEvent(event);
 
         setLocalAlerts((prev) => [
           { ...err, id: alertId } as SyncError & { id: string },
@@ -368,12 +390,15 @@ export default function MonitorPage() {
   const acknowledgeAlert = (idx: number) => {
     const alert = localAlerts[idx];
     if (alert && (alert as SyncError & { id?: string }).id) {
-      removeActiveAlert((alert as SyncError & { id: string }).id);
+      const id = (alert as SyncError & { id: string }).id;
+      removeActiveAlert(id);
+      acknowledgeSyncEvent(id, operator || '匿名操作员');
     }
     setLocalAlerts((prev) => prev.filter((_, i) => i !== idx));
   };
 
   const colors = ringColorMap();
+  const currentScriptEvents = currentScript ? syncEvents.filter(e => e.scriptId === currentScript.id).sort((a, b) => b.timestamp - a.timestamp) : [];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20, minHeight: 'calc(100vh - 7rem)' }}>
@@ -391,6 +416,25 @@ export default function MonitorPage() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <User size={14} style={{ color: 'var(--text-muted)' }} />
+            <input
+              value={operator}
+              onChange={(e) => setOperator(e.target.value)}
+              placeholder="操作员姓名"
+              style={{
+                background: 'var(--bg-primary)',
+                border: '1px solid var(--border)',
+                color: 'var(--text-primary)',
+                borderRadius: 6,
+                padding: '6px 10px',
+                fontSize: 12,
+                outline: 'none',
+                width: 100,
+              }}
+            />
+          </div>
+
           <select
             value={currentScriptId || ''}
             onChange={(e) => setCurrentScriptId(e.target.value || null)}
@@ -708,66 +752,173 @@ export default function MonitorPage() {
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-            <div style={{ backgroundColor: 'var(--bg-card)', borderRadius: 12, border: '1px solid var(--border)', padding: 16, maxHeight: 300, overflow: 'auto' }}>
-              <h3 className="font-display" style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', margin: '0 0 12px 0' }}>
-                <Bell size={14} style={{ verticalAlign: 'middle', marginRight: 6, color: 'var(--warning)' }} />
-                告警列表
-              </h3>
-              {localAlerts.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: 20, color: 'var(--text-muted)', fontSize: 13 }}>
-                  <BellOff size={24} style={{ marginBottom: 8, opacity: 0.4 }} />
-                  <p>暂无告警</p>
-                </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  {localAlerts.map((alert, i) => {
-                    const ring = rings.find((r) => r.id === alert.ringId);
-                    return (
-                      <div
-                        key={i}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 8,
-                          padding: '6px 10px',
-                          borderRadius: 6,
-                          backgroundColor: alert.isStutter || alert.isJitter ? 'var(--danger-dim)' : 'var(--warning-dim)',
-                          border: `1px solid ${alert.isStutter || alert.isJitter ? 'var(--danger)' : 'var(--warning)'}`,
-                          fontSize: 12,
-                        }}
-                      >
-                        {alert.isStutter || alert.isJitter ? (
-                          <AlertTriangle size={12} style={{ color: 'var(--danger)' }} />
-                        ) : (
-                          <Bell size={12} style={{ color: 'var(--warning)' }} />
-                        )}
-                        <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>
-                          {ring?.name || alert.ringId}
-                        </span>
-                        <span className="font-mono-value" style={{ color: 'var(--text-secondary)' }}>
-                          Δθ={alert.angleError.toFixed(3)}° Δt={alert.timeError.toFixed(1)}ms
-                        </span>
-                        {alert.isStutter && <span style={{ color: 'var(--danger)', fontWeight: 600 }}>卡顿</span>}
-                        {alert.isJitter && <span style={{ color: 'var(--warning)', fontWeight: 600 }}>抖动</span>}
-                        <button
-                          onClick={() => acknowledgeAlert(i)}
-                          style={{
-                            marginLeft: 'auto',
-                            padding: '2px 8px',
-                            borderRadius: 4,
-                            backgroundColor: 'var(--bg-secondary)',
-                            border: '1px solid var(--border)',
-                            color: 'var(--text-secondary)',
-                            cursor: 'pointer',
-                            fontSize: 11,
-                          }}
-                        >
-                          确认
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
+            <div style={{ backgroundColor: 'var(--bg-card)', borderRadius: 12, border: '1px solid var(--border)', padding: 16, maxHeight: 420, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, borderBottom: '1px solid var(--border)', paddingBottom: 8 }}>
+                <button
+                  onClick={() => setActiveTab('monitor')}
+                  style={{
+                    padding: '6px 12px',
+                    border: 'none',
+                    background: 'transparent',
+                    color: activeTab === 'monitor' ? 'var(--accent)' : 'var(--text-muted)',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    borderBottom: activeTab === 'monitor' ? '2px solid var(--accent)' : '2px solid transparent',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <Bell size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                  实时告警
+                </button>
+                <button
+                  onClick={() => setActiveTab('events')}
+                  style={{
+                    padding: '6px 12px',
+                    border: 'none',
+                    background: 'transparent',
+                    color: activeTab === 'events' ? 'var(--accent)' : 'var(--text-muted)',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    borderBottom: activeTab === 'events' ? '2px solid var(--accent)' : '2px solid transparent',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <History size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                  事件时间线 ({currentScriptEvents.length})
+                </button>
+              </div>
+
+              {activeTab === 'monitor' && (
+                <>
+                  <h3 className="font-display" style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', margin: '0 0 12px 0' }}>
+                    <Bell size={14} style={{ verticalAlign: 'middle', marginRight: 6, color: 'var(--warning)' }} />
+                    活跃告警
+                  </h3>
+                  {localAlerts.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: 20, color: 'var(--text-muted)', fontSize: 13 }}>
+                      <BellOff size={24} style={{ marginBottom: 8, opacity: 0.4 }} />
+                      <p>暂无告警</p>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, overflowY: 'auto' }}>
+                      {localAlerts.map((alert, i) => {
+                        const ring = rings.find((r) => r.id === alert.ringId);
+                        return (
+                          <div
+                            key={i}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 8,
+                              padding: '6px 10px',
+                              borderRadius: 6,
+                              backgroundColor: alert.isStutter || alert.isJitter ? 'var(--danger-dim)' : 'var(--warning-dim)',
+                              border: `1px solid ${alert.isStutter || alert.isJitter ? 'var(--danger)' : 'var(--warning)'}`,
+                              fontSize: 12,
+                            }}
+                          >
+                            {alert.isStutter || alert.isJitter ? (
+                              <AlertTriangle size={12} style={{ color: 'var(--danger)' }} />
+                            ) : (
+                              <Bell size={12} style={{ color: 'var(--warning)' }} />
+                            )}
+                            <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>
+                              {ring?.name || alert.ringId}
+                            </span>
+                            <span className="font-mono-value" style={{ color: 'var(--text-secondary)' }}>
+                              Δθ={alert.angleError.toFixed(3)}° Δt={alert.timeError.toFixed(1)}ms
+                            </span>
+                            {alert.isStutter && <span style={{ color: 'var(--danger)', fontWeight: 600 }}>卡顿</span>}
+                            {alert.isJitter && <span style={{ color: 'var(--warning)', fontWeight: 600 }}>抖动</span>}
+                            <button
+                              onClick={() => acknowledgeAlert(i)}
+                              style={{
+                                marginLeft: 'auto',
+                                padding: '2px 8px',
+                                borderRadius: 4,
+                                backgroundColor: 'var(--bg-secondary)',
+                                border: '1px solid var(--border)',
+                                color: 'var(--text-secondary)',
+                                cursor: 'pointer',
+                                fontSize: 11,
+                              }}
+                            >
+                              确认
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {activeTab === 'events' && (
+                <>
+                  <h3 className="font-display" style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', margin: '0 0 12px 0' }}>
+                    <Clock size={14} style={{ verticalAlign: 'middle', marginRight: 6, color: 'var(--accent)' }} />
+                    告警事件时间线
+                  </h3>
+                  {currentScriptEvents.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: 20, color: 'var(--text-muted)', fontSize: 13 }}>
+                      <History size={24} style={{ marginBottom: 8, opacity: 0.4 }} />
+                      <p>暂无历史事件</p>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, overflowY: 'auto' }}>
+                      {currentScriptEvents.map((event) => {
+                        const ring = rings.find((r) => r.id === event.ringId);
+                        return (
+                          <div
+                            key={event.id}
+                            onClick={() => {
+                              setCurrentTime(event.timeInScript);
+                              setActiveTab('monitor');
+                            }}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 8,
+                              padding: '8px 10px',
+                              borderRadius: 6,
+                              backgroundColor: event.acknowledged ? 'var(--bg-secondary)' : (event.isStutter || event.isJitter ? 'var(--danger-dim)' : 'var(--warning-dim)'),
+                              border: `1px solid ${event.acknowledged ? 'var(--border)' : (event.isStutter || event.isJitter ? 'var(--danger)' : 'var(--warning)')}`,
+                              fontSize: 12,
+                              cursor: 'pointer',
+                              opacity: event.acknowledged ? 0.7 : 1,
+                            }}
+                          >
+                            {event.acknowledged ? (
+                              <CheckCircle2 size={12} style={{ color: 'var(--accent)' }} />
+                            ) : event.isStutter || event.isJitter ? (
+                              <AlertTriangle size={12} style={{ color: 'var(--danger)' }} />
+                            ) : (
+                              <Bell size={12} style={{ color: 'var(--warning)' }} />
+                            )}
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ color: 'var(--text-primary)', fontWeight: 500 }}>
+                                {ring?.name || event.ringId}
+                                {event.isStutter && <span style={{ color: 'var(--danger)', marginLeft: 6 }}>卡顿</span>}
+                                {event.isJitter && <span style={{ color: 'var(--warning)', marginLeft: 6 }}>抖动</span>}
+                              </div>
+                              <div className="font-mono-value" style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+                                Δθ={event.angleError.toFixed(3)}° Δt={event.timeError.toFixed(1)}ms | 脚本时间 t={event.timeInScript.toFixed(1)}s
+                              </div>
+                              {event.acknowledged && event.acknowledgedBy && (
+                                <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 2 }}>
+                                  ✓ {event.acknowledgedBy} 于 {new Date(event.acknowledgedAt!).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })} 确认
+                                </div>
+                              )}
+                            </div>
+                            <span style={{ color: 'var(--accent)', fontSize: 10, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                              点击跳转 →
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
               )}
             </div>
 

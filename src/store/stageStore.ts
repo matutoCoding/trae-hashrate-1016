@@ -5,9 +5,12 @@ import type {
   MotionScript,
   Scene,
   MotionSegment,
+  LiftSegment,
   SyncError,
+  SyncEvent,
   SyncThreshold,
   Template,
+  ScriptVersion,
 } from '@/types';
 
 interface StageStore {
@@ -17,6 +20,8 @@ interface StageStore {
   currentScriptId: string | null;
   syncThreshold: SyncThreshold;
   syncErrors: SyncError[];
+  syncEvents: SyncEvent[];
+  scriptVersions: ScriptVersion[];
   templates: Template[];
   activeAlertIds: string[];
 
@@ -43,9 +48,21 @@ interface StageStore {
   updateMotionSegment: (scriptId: string, sceneId: string, segmentId: string, segment: Partial<MotionSegment>) => void;
   removeMotionSegment: (scriptId: string, sceneId: string, segmentId: string) => void;
 
+  addLiftSegment: (scriptId: string, sceneId: string, segment: LiftSegment) => void;
+  updateLiftSegment: (scriptId: string, sceneId: string, segmentId: string, segment: Partial<LiftSegment>) => void;
+  removeLiftSegment: (scriptId: string, sceneId: string, segmentId: string) => void;
+
   setSyncThreshold: (threshold: SyncThreshold) => void;
   addSyncError: (error: SyncError) => void;
   clearSyncErrors: () => void;
+
+  addSyncEvent: (event: SyncEvent) => void;
+  acknowledgeSyncEvent: (eventId: string, operator: string) => void;
+  clearSyncEventsForScript: (scriptId: string) => void;
+
+  addScriptVersion: (version: ScriptVersion) => void;
+  removeScriptVersion: (id: string) => void;
+  getScriptVersions: (scriptId: string) => ScriptVersion[];
 
   addTemplate: (template: Template) => void;
   updateTemplate: (id: string, template: Partial<Template>) => void;
@@ -77,6 +94,8 @@ const storageKeys = {
   scripts: 'stagerig_scripts',
   templates: 'stagerig_templates',
   syncThreshold: 'stagerig_syncThreshold',
+  syncEvents: 'stagerig_syncEvents',
+  scriptVersions: 'stagerig_scriptVersions',
 };
 
 export const useStageStore = create<StageStore>((set, get) => ({
@@ -90,6 +109,8 @@ export const useStageStore = create<StageStore>((set, get) => ({
     stutterThreshold: 3,
   }),
   syncErrors: [],
+  syncEvents: loadFromStorage<SyncEvent[]>(storageKeys.syncEvents, []),
+  scriptVersions: loadFromStorage<ScriptVersion[]>(storageKeys.scriptVersions, []),
   templates: loadFromStorage<Template[]>(storageKeys.templates, []),
   activeAlertIds: [],
 
@@ -242,12 +263,106 @@ export const useStageStore = create<StageStore>((set, get) => ({
     saveToStorage(storageKeys.scripts, scripts);
   },
 
+  addLiftSegment: (scriptId, sceneId, segment) => {
+    const scripts = get().scripts.map((s) =>
+      s.id === scriptId
+        ? {
+            ...s,
+            scenes: s.scenes.map((sc) =>
+              sc.id === sceneId
+                ? { ...sc, liftSegments: [...sc.liftSegments, segment] }
+                : sc
+            ),
+            updatedAt: Date.now(),
+          }
+        : s
+    );
+    set({ scripts });
+    saveToStorage(storageKeys.scripts, scripts);
+  },
+  updateLiftSegment: (scriptId, sceneId, segmentId, segment) => {
+    const scripts = get().scripts.map((s) =>
+      s.id === scriptId
+        ? {
+            ...s,
+            scenes: s.scenes.map((sc) =>
+              sc.id === sceneId
+                ? {
+                    ...sc,
+                    liftSegments: sc.liftSegments.map((ls) =>
+                      ls.id === segmentId ? { ...ls, ...segment } : ls
+                    ),
+                  }
+                : sc
+            ),
+            updatedAt: Date.now(),
+          }
+        : s
+    );
+    set({ scripts });
+    saveToStorage(storageKeys.scripts, scripts);
+  },
+  removeLiftSegment: (scriptId, sceneId, segmentId) => {
+    const scripts = get().scripts.map((s) =>
+      s.id === scriptId
+        ? {
+            ...s,
+            scenes: s.scenes.map((sc) =>
+              sc.id === sceneId
+                ? {
+                    ...sc,
+                    liftSegments: sc.liftSegments.filter((ls) => ls.id !== segmentId),
+                  }
+                : sc
+            ),
+            updatedAt: Date.now(),
+          }
+        : s
+    );
+    set({ scripts });
+    saveToStorage(storageKeys.scripts, scripts);
+  },
+
   setSyncThreshold: (threshold) => {
     set({ syncThreshold: threshold });
     saveToStorage(storageKeys.syncThreshold, threshold);
   },
   addSyncError: (error) => set((s) => ({ syncErrors: [...s.syncErrors, error] })),
   clearSyncErrors: () => set({ syncErrors: [] }),
+
+  addSyncEvent: (event) => {
+    const syncEvents = [...get().syncEvents, event];
+    set({ syncEvents });
+    saveToStorage(storageKeys.syncEvents, syncEvents);
+  },
+  acknowledgeSyncEvent: (eventId, operator) => {
+    const syncEvents = get().syncEvents.map((e) =>
+      e.id === eventId
+        ? { ...e, acknowledged: true, acknowledgedBy: operator, acknowledgedAt: Date.now() }
+        : e
+    );
+    set({ syncEvents });
+    saveToStorage(storageKeys.syncEvents, syncEvents);
+  },
+  clearSyncEventsForScript: (scriptId) => {
+    const syncEvents = get().syncEvents.filter((e) => e.scriptId !== scriptId);
+    set({ syncEvents });
+    saveToStorage(storageKeys.syncEvents, syncEvents);
+  },
+
+  addScriptVersion: (version) => {
+    const scriptVersions = [...get().scriptVersions, version];
+    set({ scriptVersions });
+    saveToStorage(storageKeys.scriptVersions, scriptVersions);
+  },
+  removeScriptVersion: (id) => {
+    const scriptVersions = get().scriptVersions.filter((v) => v.id !== id);
+    set({ scriptVersions });
+    saveToStorage(storageKeys.scriptVersions, scriptVersions);
+  },
+  getScriptVersions: (scriptId) => {
+    return get().scriptVersions.filter((v) => v.scriptId === scriptId).sort((a, b) => b.createdAt - a.createdAt);
+  },
 
   addTemplate: (template) => {
     const templates = [...get().templates, template];

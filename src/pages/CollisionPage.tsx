@@ -1,9 +1,9 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useStageStore } from '@/store/stageStore';
-import { RING_COLORS, type VerificationItem, type CollisionResult, type CollisionZone, type TurntableRing } from '@/types';
-import { linearVelocity, relativeLinearVelocity, detectCollisions, verifyTorque, verifySafety, computeCompositeTrajectory, angularPositionAt, rpmToRadPerSec, totalAngleAt } from '@/utils/physics';
+import { RING_COLORS, type VerificationItem, type CollisionResult, type CollisionZone, type TurntableRing, type SafetyReport, type SafetyReportItem } from '@/types';
+import { linearVelocity, relativeLinearVelocity, detectCollisions, verifyTorque, verifySafety, computeCompositeTrajectory, angularPositionAt, rpmToRadPerSec, totalAngleAt, generateId } from '@/utils/physics';
 import { G_ACCEL, SAFETY_TANGENTIAL_ACCEL } from '@/types';
-import { ShieldAlert, AlertTriangle, CheckCircle2, Play, RotateCcw } from 'lucide-react';
+import { ShieldAlert, AlertTriangle, CheckCircle2, Play, RotateCcw, Download, FileText, History } from 'lucide-react';
 
 const LINEAR_VELOCITY_LIMIT = 2.0;
 
@@ -179,9 +179,13 @@ function TurntableCanvas({
     ctx.stroke();
 
     const allZones: { startAngle: number; endAngle: number; severity: CollisionZone['severity'] }[] = [];
+    const activeZones: { startAngle: number; endAngle: number; severity: CollisionZone['severity'] }[] = [];
     for (const cr of collisionResults) {
       for (const z of cr.collisionZones) {
         allZones.push(z);
+        if (animTime >= z.startTime - 0.5 && animTime <= z.endTime + 0.5) {
+          activeZones.push(z);
+        }
       }
     }
 
@@ -232,7 +236,7 @@ function TurntableCanvas({
       ctx.restore();
     }
 
-    for (const zone of allZones) {
+    for (const zone of activeZones) {
       const isCritical = zone.severity === 'critical';
       const flashVisible = flashOn || !isCritical;
 
@@ -258,7 +262,7 @@ function TurntableCanvas({
     }
 
     const safeFlashOn = Math.floor(Date.now() / 600) % 2 === 0;
-    if (safeFlashOn && allZones.length === 0 && rings.length > 1) {
+    if (safeFlashOn && activeZones.length === 0 && rings.length > 1) {
       for (let ri = 0; ri < rings.length - 1; ri++) {
         const boundaryR = rings[ri].radius * scale;
         ctx.save();
@@ -444,11 +448,198 @@ function TrajectoryCanvas({
   );
 }
 
+function generateSafetyReport(
+  script: import('@/types').MotionScript | null,
+  sortedRings: TurntableRing[],
+  segmentsMap: Record<string, import('@/types').MotionSegment[]>,
+  collisionResults: CollisionResult[],
+): SafetyReport | null {
+  if (!script || script.scenes.length === 0) return null;
+
+  const ringNameMap: Record<string, string> = {};
+  sortedRings.forEach(r => { ringNameMap[r.id] = r.name; });
+
+  const sceneReports: SafetyReportItem[] = [];
+  let totalOverSpeed = 0;
+  let totalTorqueWarnings = 0;
+  let totalSafetyWarnings = 0;
+  let totalCollisions = 0;
+  let criticalCollisions = 0;
+  let overallStatus: SafetyReport['overallStatus'] = 'ok';
+
+  for (const scene of script.scenes) {
+    const sceneMotionSegs: Record<string, import('@/types').MotionSegment[]> = {};
+    for (const seg of scene.motionSegments) {
+      if (!sceneMotionSegs[seg.ringId]) sceneMotionSegs[seg.ringId] = [];
+      sceneMotionSegs[seg.ringId].push(seg);
+    }
+
+    const overSpeedItems: SafetyReportItem['overSpeedItems'] = [];
+    for (const ring of sortedRings) {
+      const segs = sceneMotionSegs[ring.id] || [];
+      if (segs.length === 0) continue;
+      const maxRPM = Math.max(...segs.map(s => s.targetRPM));
+      const v = linearVelocity(maxRPM, ring.radius);
+      if (v > LINEAR_VELOCITY_LIMIT) {
+        overSpeedItems.push({ ringName: ring.name, maxRPM, maxVelocity: v, limit: LINEAR_VELOCITY_LIMIT });
+        totalOverSpeed++;
+        overallStatus = 'danger';
+      }
+    }
+
+    const torqueItems: SafetyReportItem['torqueItems'] = [];
+    for (const ring of sortedRings) {
+      const segs = sceneMotionSegs[ring.id] || [];
+      for (const seg of segs) {
+        const v = verifyTorque(seg, ring);
+        if (v.severity !== 'ok') {
+          torqueItems.push({ ringName: ring.name, value: v.value, limit: v.limit, severity: v.severity });
+          if (v.severity === 'danger') totalTorqueWarnings += 2; else totalTorqueWarnings++;
+          if (v.severity === 'danger') overallStatus = 'danger';
+          else if (overallStatus === 'ok') overallStatus = 'warning';
+        }
+      }
+    }
+
+    const safetyItems: SafetyReportItem['safetyItems'] = [];
+    for (const ring of sortedRings) {
+      const segs = sceneMotionSegs[ring.id] || [];
+      for (const seg of segs) {
+        const v = verifySafety(seg, ring);
+        if (v.severity !== 'ok') {
+          safetyItems.push({ ringName: ring.name, value: v.value, limit: v.limit, severity: v.severity });
+          if (v.severity === 'danger') totalSafetyWarnings += 2; else totalSafetyWarnings++;
+          if (v.severity === 'danger') overallStatus = 'danger';
+          else if (overallStatus === 'ok') overallStatus = 'warning';
+        }
+      }
+    }
+
+    const collisionItems: SafetyReportItem['collisionItems'] = [];
+    for (const cr of collisionResults) {
+      for (const z of cr.collisionZones) {
+        if (z.startTime >= scene.startTime && z.startTime <= scene.endTime) {
+          collisionItems.push({
+            ringA: ringNameMap[cr.ringIdA] ?? cr.ringIdA,
+            ringB: ringNameMap[cr.ringIdB] ?? cr.ringIdB,
+            startTime: z.startTime,
+            endTime: z.endTime,
+            severity: z.severity,
+          });
+          totalCollisions++;
+          if (z.severity === 'critical') criticalCollisions++;
+          if (z.severity === 'critical') overallStatus = 'danger';
+          else if (overallStatus === 'ok') overallStatus = 'warning';
+        }
+      }
+    }
+
+    sceneReports.push({
+      sceneId: scene.id,
+      sceneName: scene.name,
+      startTime: scene.startTime,
+      endTime: scene.endTime,
+      overSpeedItems,
+      torqueItems,
+      safetyItems,
+      collisionItems,
+    });
+  }
+
+  const scriptDuration = Math.max(...script.scenes.map(s => s.endTime), 0);
+
+  return {
+    scriptId: script.id,
+    scriptName: script.name,
+    operator: script.operator,
+    generatedAt: Date.now(),
+    totalDuration: scriptDuration,
+    overallStatus,
+    scenes: sceneReports,
+    summary: {
+      totalOverSpeed,
+      totalTorqueWarnings,
+      totalSafetyWarnings,
+      totalCollisions,
+      criticalCollisions,
+    },
+  };
+}
+
+function reportToText(report: SafetyReport): string {
+  const lines: string[] = [];
+  lines.push('╔══════════════════════════════════════════════════════════════╗');
+  lines.push('║            舞台转台演出安全报告                              ║');
+  lines.push('╚══════════════════════════════════════════════════════════════╝');
+  lines.push('');
+  lines.push(`生成时间: ${new Date(report.generatedAt).toLocaleString('zh-CN')}`);
+  lines.push(`脚本名称: ${report.scriptName}`);
+  lines.push(`操作员: ${report.operator || '(未填写)'}`);
+  lines.push(`总时长: ${formatNum(report.totalDuration, 1)}s`);
+  lines.push(`整体状态: ${report.overallStatus === 'ok' ? '✓ 安全' : report.overallStatus === 'warning' ? '⚠ 警告' : '✗ 危险'}`);
+  lines.push('');
+  lines.push('═══════════════════════════════════════════════════════════════');
+  lines.push('【汇总统计】');
+  lines.push(`  • 超速项: ${report.summary.totalOverSpeed} 项`);
+  lines.push(`  • 扭矩告警: ${report.summary.totalTorqueWarnings} 项`);
+  lines.push(`  • 安全加速度告警: ${report.summary.totalSafetyWarnings} 项`);
+  lines.push(`  • 碰撞片段: ${report.summary.totalCollisions} 段 (严重: ${report.summary.criticalCollisions} 段)`);
+  lines.push('');
+  lines.push('═══════════════════════════════════════════════════════════════');
+
+  for (const scene of report.scenes) {
+    const sceneStatus =
+      scene.collisionItems.some(c => c.severity === 'critical')
+        || scene.torqueItems.some(t => t.severity === 'danger')
+        || scene.safetyItems.some(s => s.severity === 'danger')
+        || scene.overSpeedItems.length > 0 ? '✗ 危险'
+      : scene.collisionItems.some(c => c.severity === 'warning')
+        || scene.torqueItems.some(t => t.severity === 'warning')
+        || scene.safetyItems.some(s => s.severity === 'warning') ? '⚠ 警告'
+      : '✓ 安全';
+
+    lines.push(`【${scene.sceneName}】 ${formatNum(scene.startTime, 1)}s - ${formatNum(scene.endTime, 1)}s    [${sceneStatus}]`);
+    if (scene.overSpeedItems.length > 0) {
+      lines.push(`  → 超速 (${scene.overSpeedItems.length} 项):`);
+      for (const item of scene.overSpeedItems) {
+        lines.push(`    • ${item.ringName}: ${formatNum(item.maxVelocity, 3)} m/s (限制 ${item.limit} m/s), ${item.maxRPM} RPM`);
+      }
+    }
+    if (scene.torqueItems.length > 0) {
+      lines.push(`  → 扭矩告警 (${scene.torqueItems.length} 项):`);
+      for (const item of scene.torqueItems) {
+        lines.push(`    ${item.severity === 'danger' ? '✗' : '⚠'} ${item.ringName}: ${item.value} (限制 ${item.limit})`);
+      }
+    }
+    if (scene.safetyItems.length > 0) {
+      lines.push(`  → 安全加速度告警 (${scene.safetyItems.length} 项):`);
+      for (const item of scene.safetyItems) {
+        lines.push(`    ${item.severity === 'danger' ? '✗' : '⚠'} ${item.ringName}: ${item.value} (限制 ${item.limit})`);
+      }
+    }
+    if (scene.collisionItems.length > 0) {
+      lines.push(`  → 碰撞片段 (${scene.collisionItems.length} 段):`);
+      for (const item of scene.collisionItems) {
+        lines.push(`    ${item.severity === 'critical' ? '✗' : '⚠'} ${item.ringA} ↔ ${item.ringB}: ${formatNum(item.startTime, 1)}s - ${formatNum(item.endTime, 1)}s`);
+      }
+    }
+    lines.push('');
+  }
+
+  lines.push('═══════════════════════════════════════════════════════════════');
+  lines.push('报告由 StageRig 舞台转台联动控制系统自动生成');
+  lines.push(`生成时间戳: ${report.generatedAt}`);
+
+  return lines.join('\n');
+}
+
 export default function CollisionPage() {
   const { rings, lifts, scripts, currentScriptId, getCurrentScript } = useStageStore();
   const [animTime, setAnimTime] = useState(0);
   const [animPlaying, setAnimPlaying] = useState(false);
   const [animSpeed, setAnimSpeed] = useState(1);
+  const [showReport, setShowReport] = useState(false);
+  const [activeTab, setActiveTab] = useState<'overview' | 'history'>('overview');
 
   const currentScript = getCurrentScript();
 
@@ -657,6 +848,61 @@ export default function CollisionPage() {
             gap: 12,
           }}
         >
+          <button
+            onClick={() => {
+              const rpt = generateSafetyReport(currentScript, sortedRings, segmentsMap, collisionResults);
+              if (rpt) {
+                const blob = new Blob([reportToText(rpt)], { type: 'text/plain;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${rpt.scriptName.replace(/\s+/g, '_')}_安全报告_${new Date().toISOString().slice(0, 10)}.txt`;
+                a.click();
+                URL.revokeObjectURL(url);
+              }
+            }}
+            disabled={!currentScript}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '8px 14px',
+              borderRadius: 8,
+              backgroundColor: 'var(--bg-secondary)',
+              border: '1px solid var(--border)',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+              fontWeight: 600,
+              fontSize: 13,
+              opacity: !currentScript ? 0.4 : 1,
+            }}
+          >
+            <Download size={14} />
+            导出报告
+          </button>
+
+          <button
+            onClick={() => setShowReport(!showReport)}
+            disabled={!currentScript}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '8px 14px',
+              borderRadius: 8,
+              backgroundColor: showReport ? 'var(--accent-dim)' : 'var(--bg-secondary)',
+              border: `1px solid ${showReport ? 'var(--accent)' : 'var(--border)'}`,
+              color: showReport ? 'var(--accent)' : 'var(--text-secondary)',
+              cursor: 'pointer',
+              fontWeight: 600,
+              fontSize: 13,
+              opacity: !currentScript ? 0.4 : 1,
+            }}
+          >
+            <FileText size={14} />
+            {showReport ? '关闭报告' : '安全报告'}
+          </button>
+
           <div
             style={{
               display: 'inline-flex',
@@ -980,94 +1226,223 @@ export default function CollisionPage() {
             title="碰撞检测 - 转台俯视图"
             icon={<ShieldAlert size={18} style={{ color: hasAnyCollision ? 'var(--danger)' : 'var(--accent)' }} />}
           >
-            <TurntableCanvas
-              rings={sortedRings}
-              collisionResults={collisionResults}
-              animTime={animTime}
-              segmentsMap={segmentsMap}
-            />
-            {hasAnyCollision && (
-              <div style={{ marginTop: 12 }}>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    marginBottom: 8,
-                    color: 'var(--danger)',
-                    fontWeight: 600,
-                    fontSize: 14,
-                  }}
-                >
-                  <ShieldAlert size={16} />
-                  检测到碰撞区域
-                </div>
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                    <thead>
-                      <TableHeader columns={['环A', '环B', '碰撞起始角(°)', '碰撞终止角(°)', '起始时间(s)', '终止时间(s)', '严重程度']} />
-                    </thead>
-                    <tbody>
-                      {collisionResults.flatMap(cr =>
-                        cr.collisionZones.map((zone, zi) => (
-                          <tr key={`${cr.ringIdA}-${cr.ringIdB}-${zi}`} style={{ borderBottom: '1px solid var(--border)' }}>
-                            <td style={{ padding: '6px 14px', fontWeight: 500 }}>
-                              {sortedRings.find(r => r.id === cr.ringIdA)?.name ?? cr.ringIdA}
-                            </td>
-                            <td style={{ padding: '6px 14px', fontWeight: 500 }}>
-                              {sortedRings.find(r => r.id === cr.ringIdB)?.name ?? cr.ringIdB}
-                            </td>
-                            <td className="font-mono-value" style={{ padding: '6px 14px', color: 'var(--text-secondary)' }}>
-                              {formatNum(zone.startAngle, 1)}
-                            </td>
-                            <td className="font-mono-value" style={{ padding: '6px 14px', color: 'var(--text-secondary)' }}>
-                              {formatNum(zone.endAngle, 1)}
-                            </td>
-                            <td className="font-mono-value" style={{ padding: '6px 14px', color: 'var(--text-secondary)' }}>
-                              {formatNum(zone.startTime, 1)}
-                            </td>
-                            <td className="font-mono-value" style={{ padding: '6px 14px', color: 'var(--text-secondary)' }}>
-                              {formatNum(zone.endTime, 1)}
-                            </td>
-                            <td style={{ padding: '6px 14px' }}>
-                              <span
-                                style={{
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: 4,
-                                  padding: '2px 8px',
-                                  borderRadius: 4,
-                                  backgroundColor: zone.severity === 'critical' ? 'var(--danger-dim)' : 'var(--warning-dim)',
-                                  color: zone.severity === 'critical' ? 'var(--danger)' : 'var(--warning)',
-                                  fontSize: 12,
-                                  fontWeight: 600,
-                                }}
-                              >
-                                {zone.severity === 'critical' ? '✗ 严重' : '⚠ 警告'}
-                              </span>
-                            </td>
-                          </tr>
-                        )),
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-            {!hasAnyCollision && sortedRings.length > 1 && (
-              <div
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12, borderBottom: '1px solid var(--border)' }}>
+              <button
+                onClick={() => setActiveTab('overview')}
                 style={{
-                  marginTop: 12,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  color: 'var(--accent)',
+                  padding: '8px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  color: activeTab === 'overview' ? 'var(--accent)' : 'var(--text-muted)',
+                  fontSize: 13,
                   fontWeight: 600,
-                  fontSize: 14,
+                  borderBottom: activeTab === 'overview' ? '2px solid var(--accent)' : '2px solid transparent',
+                  cursor: 'pointer',
                 }}
               >
-                <CheckCircle2 size={16} />
-                未检测到碰撞，所有区域安全
+                实时碰撞
+              </button>
+              <button
+                onClick={() => setActiveTab('history')}
+                style={{
+                  padding: '8px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  color: activeTab === 'history' ? 'var(--accent)' : 'var(--text-muted)',
+                  fontSize: 13,
+                  fontWeight: 600,
+                  borderBottom: activeTab === 'history' ? '2px solid var(--accent)' : '2px solid transparent',
+                  cursor: 'pointer',
+                }}
+              >
+                <History size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                历史碰撞 ({collisionResults.reduce((sum, cr) => sum + cr.collisionZones.length, 0)})
+              </button>
+            </div>
+
+            {activeTab === 'overview' && (
+              <>
+                <TurntableCanvas
+                  rings={sortedRings}
+                  collisionResults={collisionResults}
+                  animTime={animTime}
+                  segmentsMap={segmentsMap}
+                />
+                {hasAnyCollision && (
+                  <div style={{ marginTop: 12 }}>
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        marginBottom: 8,
+                        color: 'var(--danger)',
+                        fontWeight: 600,
+                        fontSize: 14,
+                      }}
+                    >
+                      <ShieldAlert size={16} />
+                      当前时间附近的碰撞区域
+                    </div>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <thead>
+                          <TableHeader columns={['环A', '环B', '碰撞起始角(°)', '碰撞终止角(°)', '起始时间(s)', '终止时间(s)', '严重程度', '操作']} />
+                        </thead>
+                        <tbody>
+                          {collisionResults.flatMap(cr =>
+                            cr.collisionZones
+                              .filter(z => animTime >= z.startTime - 0.5 && animTime <= z.endTime + 0.5)
+                              .map((zone, zi) => (
+                                <tr key={`${cr.ringIdA}-${cr.ringIdB}-${zi}`} style={{ borderBottom: '1px solid var(--border)' }}>
+                                  <td style={{ padding: '6px 14px', fontWeight: 500 }}>
+                                    {sortedRings.find(r => r.id === cr.ringIdA)?.name ?? cr.ringIdA}
+                                  </td>
+                                  <td style={{ padding: '6px 14px', fontWeight: 500 }}>
+                                    {sortedRings.find(r => r.id === cr.ringIdB)?.name ?? cr.ringIdB}
+                                  </td>
+                                  <td className="font-mono-value" style={{ padding: '6px 14px', color: 'var(--text-secondary)' }}>
+                                    {formatNum(zone.startAngle, 1)}
+                                  </td>
+                                  <td className="font-mono-value" style={{ padding: '6px 14px', color: 'var(--text-secondary)' }}>
+                                    {formatNum(zone.endAngle, 1)}
+                                  </td>
+                                  <td className="font-mono-value" style={{ padding: '6px 14px', color: 'var(--text-secondary)' }}>
+                                    {formatNum(zone.startTime, 1)}
+                                  </td>
+                                  <td className="font-mono-value" style={{ padding: '6px 14px', color: 'var(--text-secondary)' }}>
+                                    {formatNum(zone.endTime, 1)}
+                                  </td>
+                                  <td style={{ padding: '6px 14px' }}>
+                                    <span
+                                      style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: 4,
+                                        padding: '2px 8px',
+                                        borderRadius: 4,
+                                        backgroundColor: zone.severity === 'critical' ? 'var(--danger-dim)' : 'var(--warning-dim)',
+                                        color: zone.severity === 'critical' ? 'var(--danger)' : 'var(--warning)',
+                                        fontSize: 12,
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      {zone.severity === 'critical' ? '✗ 严重' : '⚠ 警告'}
+                                    </span>
+                                  </td>
+                                  <td style={{ padding: '6px 14px' }}>
+                                    <button
+                                      onClick={() => {
+                                        setAnimPlaying(false);
+                                        setAnimTime(zone.startTime);
+                                      }}
+                                      style={{
+                                        background: 'var(--accent-dim)',
+                                        border: 'none',
+                                        color: 'var(--accent)',
+                                        padding: '2px 8px',
+                                        borderRadius: 4,
+                                        fontSize: 11,
+                                        cursor: 'pointer',
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      跳转到
+                                    </button>
+                                  </td>
+                                </tr>
+                              )),
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+                {!hasAnyCollision && sortedRings.length > 1 && (
+                  <div
+                    style={{
+                      marginTop: 12,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      color: 'var(--accent)',
+                      fontWeight: 600,
+                      fontSize: 14,
+                    }}
+                  >
+                    <CheckCircle2 size={16} />
+                    未检测到碰撞，所有区域安全
+                  </div>
+                )}
+              </>
+            )}
+
+            {activeTab === 'history' && (
+              <div style={{ maxHeight: 500, overflowY: 'auto' }}>
+                {collisionResults.length === 0 ? (
+                  <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 40, fontSize: 14 }}>
+                    暂无碰撞记录
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {collisionResults.flatMap(cr =>
+                      cr.collisionZones.map((zone, zi) => (
+                        <div
+                          key={`${cr.ringIdA}-${cr.ringIdB}-${zi}`}
+                          onClick={() => {
+                            setAnimPlaying(false);
+                            setAnimTime(zone.startTime);
+                            setActiveTab('overview');
+                          }}
+                          style={{
+                            padding: 12,
+                            borderRadius: 6,
+                            background: zone.severity === 'critical' ? 'var(--danger-dim)' : 'var(--warning-dim)',
+                            border: `1px solid ${zone.severity === 'critical' ? 'var(--danger)' : 'var(--warning)'}`,
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 12,
+                          }}
+                        >
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              width: 32,
+                              height: 32,
+                              borderRadius: '50%',
+                              background: zone.severity === 'critical' ? 'var(--danger)' : 'var(--warning)',
+                              color: '#fff',
+                              fontWeight: 700,
+                              flexShrink: 0,
+                            }}
+                          >
+                            {zone.severity === 'critical' ? '✗' : '⚠'}
+                          </span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 13, marginBottom: 2 }}>
+                              {sortedRings.find(r => r.id === cr.ringIdA)?.name ?? cr.ringIdA}
+                              {' ↔ '}
+                              {sortedRings.find(r => r.id === cr.ringIdB)?.name ?? cr.ringIdB}
+                            </div>
+                            <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                              角度: {formatNum(zone.startAngle, 1)}° → {formatNum(zone.endAngle, 1)}°
+                              {' | '}
+                              时间: {formatNum(zone.startTime, 1)}s → {formatNum(zone.endTime, 1)}s
+                              {' | '}
+                              时长: {formatNum(zone.endTime - zone.startTime, 1)}s
+                            </div>
+                          </div>
+                          <span style={{ color: 'var(--accent)', fontSize: 11, fontWeight: 600, flexShrink: 0 }}>
+                            点击跳转 →
+                          </span>
+                        </div>
+                      )),
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </CardSection>
@@ -1226,6 +1601,141 @@ export default function CollisionPage() {
               升降台+转台运动叠加时的复合轨迹，X-Y平面投影，Z轴高度映射为颜色(蓝→低，红→高)
             </div>
           </CardSection>
+
+          {showReport && currentScript && (
+            <CardSection
+              title="演出安全报告"
+              icon={<FileText size={18} style={{ color: 'var(--accent)' }} />}
+            >
+              {(() => {
+                const rpt = generateSafetyReport(currentScript, sortedRings, segmentsMap, collisionResults);
+                if (!rpt) return <div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: 20 }}>无可用报告</div>;
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 12, background: 'var(--bg-secondary)', borderRadius: 6 }}>
+                      <div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{rpt.scriptName}</div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                          操作员: {rpt.operator || '(未填写)'} | 生成时间: {new Date(rpt.generatedAt).toLocaleString('zh-CN')} | 总时长: {formatNum(rpt.totalDuration, 1)}s
+                        </div>
+                      </div>
+                      <div
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          padding: '8px 16px',
+                          borderRadius: 8,
+                          backgroundColor: rpt.overallStatus === 'ok' ? 'var(--accent-dim)' : rpt.overallStatus === 'warning' ? 'var(--warning-dim)' : 'var(--danger-dim)',
+                          border: `1px solid ${rpt.overallStatus === 'ok' ? 'var(--accent)' : rpt.overallStatus === 'warning' ? 'var(--warning)' : 'var(--danger)'}`,
+                          color: rpt.overallStatus === 'ok' ? 'var(--accent)' : rpt.overallStatus === 'warning' ? 'var(--warning)' : 'var(--danger)',
+                          fontWeight: 700,
+                          fontSize: 14,
+                        }}
+                      >
+                        {rpt.overallStatus === 'ok' ? '✓ 整体安全' : rpt.overallStatus === 'warning' ? '⚠ 存在警告' : '✗ 存在危险'}
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
+                      <div style={{ padding: 12, background: 'var(--bg-secondary)', borderRadius: 6, textAlign: 'center' }}>
+                        <div style={{ fontSize: 20, fontWeight: 700, color: rpt.summary.totalOverSpeed > 0 ? 'var(--danger)' : 'var(--accent)', fontFamily: 'var(--font-mono)' }}>{rpt.summary.totalOverSpeed}</div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>超速项</div>
+                      </div>
+                      <div style={{ padding: 12, background: 'var(--bg-secondary)', borderRadius: 6, textAlign: 'center' }}>
+                        <div style={{ fontSize: 20, fontWeight: 700, color: rpt.summary.totalTorqueWarnings > 0 ? 'var(--warning)' : 'var(--accent)', fontFamily: 'var(--font-mono)' }}>{rpt.summary.totalTorqueWarnings}</div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>扭矩告警</div>
+                      </div>
+                      <div style={{ padding: 12, background: 'var(--bg-secondary)', borderRadius: 6, textAlign: 'center' }}>
+                        <div style={{ fontSize: 20, fontWeight: 700, color: rpt.summary.totalSafetyWarnings > 0 ? 'var(--warning)' : 'var(--accent)', fontFamily: 'var(--font-mono)' }}>{rpt.summary.totalSafetyWarnings}</div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>安全加速度告警</div>
+                      </div>
+                      <div style={{ padding: 12, background: 'var(--bg-secondary)', borderRadius: 6, textAlign: 'center' }}>
+                        <div style={{ fontSize: 20, fontWeight: 700, color: rpt.summary.totalCollisions > 0 ? 'var(--danger)' : 'var(--accent)', fontFamily: 'var(--font-mono)' }}>{rpt.summary.totalCollisions}</div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>碰撞片段</div>
+                      </div>
+                      <div style={{ padding: 12, background: 'var(--bg-secondary)', borderRadius: 6, textAlign: 'center' }}>
+                        <div style={{ fontSize: 20, fontWeight: 700, color: rpt.summary.criticalCollisions > 0 ? 'var(--danger)' : 'var(--accent)', fontFamily: 'var(--font-mono)' }}>{rpt.summary.criticalCollisions}</div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>严重碰撞</div>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      {rpt.scenes.map(scene => {
+                        const hasIssue = scene.overSpeedItems.length + scene.torqueItems.length + scene.safetyItems.length + scene.collisionItems.length > 0;
+                        return (
+                          <div key={scene.sceneId} style={{ border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
+                            <div style={{ padding: '10px 14px', background: 'var(--bg-secondary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <div>
+                                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{scene.sceneName}</span>
+                                <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 8, fontFamily: 'var(--font-mono)' }}>
+                                  {formatNum(scene.startTime, 1)}s – {formatNum(scene.endTime, 1)}s
+                                </span>
+                              </div>
+                              {!hasIssue && (
+                                <span style={{ fontSize: 11, color: 'var(--accent)', fontWeight: 600 }}>✓ 该场景无问题</span>
+                              )}
+                            </div>
+                            <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                              {scene.overSpeedItems.length > 0 && (
+                                <div>
+                                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--danger)', marginBottom: 4 }}>⚠ 超速 ({scene.overSpeedItems.length} 项)</div>
+                                  {scene.overSpeedItems.map((item, i) => (
+                                    <div key={i} style={{ fontSize: 12, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', padding: '3px 8px', background: 'var(--danger-dim)', borderRadius: 3, marginBottom: 2 }}>
+                                      {item.ringName}: {formatNum(item.maxVelocity, 3)} m/s (限制 {item.limit} m/s) @ {item.maxRPM} RPM
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {scene.torqueItems.length > 0 && (
+                                <div>
+                                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--warning)', marginBottom: 4 }}>⚠ 扭矩告警 ({scene.torqueItems.length} 项)</div>
+                                  {scene.torqueItems.map((item, i) => (
+                                    <div key={i} style={{ fontSize: 12, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', padding: '3px 8px', background: 'var(--warning-dim)', borderRadius: 3, marginBottom: 2 }}>
+                                      {item.severity === 'danger' ? '✗' : '⚠'} {item.ringName}: {item.value} (限制 {item.limit})
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {scene.safetyItems.length > 0 && (
+                                <div>
+                                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--warning)', marginBottom: 4 }}>⚠ 安全加速度告警 ({scene.safetyItems.length} 项)</div>
+                                  {scene.safetyItems.map((item, i) => (
+                                    <div key={i} style={{ fontSize: 12, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', padding: '3px 8px', background: 'var(--warning-dim)', borderRadius: 3, marginBottom: 2 }}>
+                                      {item.severity === 'danger' ? '✗' : '⚠'} {item.ringName}: {item.value} (限制 {item.limit})
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {scene.collisionItems.length > 0 && (
+                                <div>
+                                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--danger)', marginBottom: 4 }}>⚠ 碰撞片段 ({scene.collisionItems.length} 段)</div>
+                                  {scene.collisionItems.map((item, i) => (
+                                    <div
+                                      key={i}
+                                      onClick={() => {
+                                        setAnimPlaying(false);
+                                        setAnimTime(item.startTime);
+                                        setShowReport(false);
+                                      }}
+                                      style={{ fontSize: 12, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', padding: '3px 8px', background: item.severity === 'critical' ? 'var(--danger-dim)' : 'var(--warning-dim)', borderRadius: 3, marginBottom: 2, cursor: 'pointer' }}
+                                    >
+                                      {item.severity === 'critical' ? '✗' : '⚠'} {item.ringA} ↔ {item.ringB}: {formatNum(item.startTime, 1)}s – {formatNum(item.endTime, 1)}s
+                                      <span style={{ float: 'right', color: 'var(--accent)', fontSize: 10 }}>点击跳转 →</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
+            </CardSection>
+          )}
         </div>
       )}
     </div>

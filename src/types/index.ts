@@ -86,6 +86,53 @@ export interface SyncError {
   isJitter: boolean;
 }
 
+export interface SyncEvent extends SyncError {
+  id: string;
+  scriptId: string;
+  timeInScript: number;
+  acknowledged: boolean;
+  acknowledgedBy?: string;
+  acknowledgedAt?: number;
+}
+
+export interface ScriptVersion {
+  id: string;
+  scriptId: string;
+  version: number;
+  note: string;
+  createdAt: number;
+  createdBy: string;
+  snapshot: MotionScript;
+}
+
+export interface SafetyReportItem {
+  sceneId: string;
+  sceneName: string;
+  startTime: number;
+  endTime: number;
+  overSpeedItems: { ringName: string; maxRPM: number; maxVelocity: number; limit: number }[];
+  torqueItems: { ringName: string; value: string; limit: string; severity: 'ok' | 'warning' | 'danger' }[];
+  safetyItems: { ringName: string; value: string; limit: string; severity: 'ok' | 'warning' | 'danger' }[];
+  collisionItems: { ringA: string; ringB: string; startTime: number; endTime: number; severity: 'warning' | 'critical' }[];
+}
+
+export interface SafetyReport {
+  scriptId: string;
+  scriptName: string;
+  operator: string;
+  generatedAt: number;
+  totalDuration: number;
+  overallStatus: 'ok' | 'warning' | 'danger';
+  scenes: SafetyReportItem[];
+  summary: {
+    totalOverSpeed: number;
+    totalTorqueWarnings: number;
+    totalSafetyWarnings: number;
+    totalCollisions: number;
+    criticalCollisions: number;
+  };
+}
+
 export interface SyncThreshold {
   angleError: number;
   timeError: number;
