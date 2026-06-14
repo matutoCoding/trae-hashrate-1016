@@ -1,0 +1,126 @@
+export interface TurntableRing {
+  id: string;
+  name: string;
+  radius: number;
+  momentOfInertia: number;
+  maxRPM: number;
+  initialAngle: number;
+  motor: {
+    ratedTorque: number;
+    peakTorque: number;
+    maxAngularAcceleration: number;
+  };
+  color: string;
+}
+
+export interface LiftPlatform {
+  id: string;
+  name: string;
+  travelRange: number;
+  maxSpeed: number;
+  maxAcceleration: number;
+}
+
+export interface MotionSegment {
+  id: string;
+  ringId: string;
+  direction: 1 | -1;
+  targetRPM: number;
+  startTime: number;
+  endTime: number;
+  accelerationTime: number;
+  decelerationTime: number;
+  curveType: 'trapezoidal' | 's-curve';
+}
+
+export interface LiftSegment {
+  id: string;
+  liftId: string;
+  startTime: number;
+  endTime: number;
+  targetHeight: number;
+  speed: number;
+}
+
+export interface Scene {
+  id: string;
+  name: string;
+  startTime: number;
+  endTime: number;
+  motionSegments: MotionSegment[];
+  liftSegments: LiftSegment[];
+}
+
+export interface MotionScript {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  operator: string;
+  scenes: Scene[];
+  rings: TurntableRing[];
+  lifts: LiftPlatform[];
+}
+
+export interface CollisionZone {
+  startAngle: number;
+  endAngle: number;
+  startTime: number;
+  endTime: number;
+  severity: 'warning' | 'critical';
+}
+
+export interface CollisionResult {
+  hasCollision: boolean;
+  ringIdA: string;
+  ringIdB: string;
+  collisionZones: CollisionZone[];
+}
+
+export interface SyncError {
+  ringId: string;
+  timestamp: number;
+  angleError: number;
+  timeError: number;
+  isStutter: boolean;
+  isJitter: boolean;
+}
+
+export interface SyncThreshold {
+  angleError: number;
+  timeError: number;
+  stutterThreshold: number;
+}
+
+export interface Template {
+  id: string;
+  name: string;
+  category: string;
+  tags: string[];
+  description: string;
+  script: MotionScript;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface VerificationItem {
+  label: string;
+  passed: boolean;
+  value: string;
+  limit: string;
+  severity: 'ok' | 'warning' | 'danger';
+}
+
+export const RING_COLORS = [
+  '#00D4AA',
+  '#3B9EFF',
+  '#A78BFA',
+  '#F59E0B',
+  '#EF4444',
+  '#EC4899',
+  '#14B8A6',
+  '#6366F1',
+];
+
+export const G_ACCEL = 9.8;
+export const SAFETY_TANGENTIAL_ACCEL = 0.5 * G_ACCEL;
